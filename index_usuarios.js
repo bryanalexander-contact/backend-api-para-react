@@ -1,29 +1,20 @@
+// index_usuarios.js (modificado: acepta "admin" y "administrador")
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const pool = require("./db");
-require("dotenv").config();
+
+const { verificarToken, authorizeRole } = require("./auth");
 
 const app = express();
 const PORT = process.env.PORT_USUARIOS || 4002;
 
+// Usa obligatoriamente la clave del .env
+const SECRET_KEY = process.env.JWT_SECRET;
+
 app.use(express.json());
 app.use(cors());
-
-const SECRET_KEY = process.env.JWT_SECRET || "CLAVE_SUPER_SECRETA";
-
-// Middleware JWT
-function verificarToken(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  if (!authHeader) return res.status(403).json({ message: "Token requerido" });
-
-  const token = authHeader.split(" ")[1];
-  jwt.verify(token, SECRET_KEY, (err, decoded) => {
-    if (err) return res.status(401).json({ message: "Token inválido" });
-    req.usuario = decoded.usuario;
-    next();
-  });
-}
 
 // Crear tabla y columnas necesarias si no existen
 (async () => {
@@ -70,10 +61,18 @@ function normalizarUsuario(row) {
   return u;
 }
 
-// Convierte "" o undefined a null
 function normalizeEmptyToNull(val) {
   if (val === "" || val === undefined) return null;
   return val;
+}
+
+// Mapeo claro de roles: acepta variantes como "administrador", "admin", "vendedor", etc.
+function mapRole(raw) {
+  if (!raw) return "cliente";
+  const r = String(raw).toLowerCase().trim();
+  if (r.includes("admin") || r.includes("administrador")) return "admin";
+  if (r.includes("vend")) return "vendedor";
+  return "cliente";
 }
 
 // ====================== RUTAS ======================
@@ -126,7 +125,21 @@ app.post("/usuarios/login", async (req, res) => {
     if (result.rows.length === 0) return res.status(401).json({ message: "Credenciales inválidas" });
 
     const userRow = result.rows[0];
-    const token = jwt.sign({ usuario: correo }, SECRET_KEY, { expiresIn: "8h" });
+
+    // Normalizamos el rol y lo incluimos en el token
+    const rawRole = userRow.tipo_usuario || userRow.tipoUsuario;
+    const normalizedRole = mapRole(rawRole);
+
+    // firmar token incluyendo id y rol normalizado
+    const payload = {
+      usuario: {
+        id: userRow.id,
+        correo: userRow.correo,
+        rol: normalizedRole,
+      },
+    };
+
+    const token = jwt.sign(payload, SECRET_KEY, { expiresIn: "8h" });
 
     const user = normalizarUsuario(userRow);
     res.json({ token, user });
@@ -136,8 +149,8 @@ app.post("/usuarios/login", async (req, res) => {
   }
 });
 
-// GET USUARIOS (admin)
-app.get("/usuarios", verificarToken, async (req, res) => {
+// GET USUARIOS (solo admin)
+app.get("/usuarios", verificarToken, authorizeRole("admin", "administrador"), async (req, res) => {
   try {
     const result = await pool.query("SELECT * FROM usuario ORDER BY id");
     const usuarios = result.rows.map(normalizarUsuario);
@@ -148,10 +161,16 @@ app.get("/usuarios", verificarToken, async (req, res) => {
   }
 });
 
-// GET usuario por id
+// GET usuario por id (requiere token pero usuario puede ver su propio registro o admin)
 app.get("/usuarios/:id", verificarToken, async (req, res) => {
   try {
     const { id } = req.params;
+    // si no es admin (aceptamos admin/administrador) solo puede ver su propio ID
+    const requesterRole = (req.usuario?.rol || req.usuario?.tipo_usuario || "").toString().toLowerCase();
+    if (requesterRole !== "admin" && requesterRole !== "administrador" && Number(req.usuario.id) !== Number(id)) {
+      return res.status(403).json({ message: "Acceso denegado" });
+    }
+
     const result = await pool.query("SELECT * FROM usuario WHERE id=$1", [id]);
     if (result.rows.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
     res.json(normalizarUsuario(result.rows[0]));
@@ -161,6 +180,6 @@ app.get("/usuarios/:id", verificarToken, async (req, res) => {
   }
 });
 
-// UPDATE, DELETE y rutas de historial se mantienen igual...
+// Aquí puedes añadir authorizeRole("admin","administrador") en rutas sensibles como delete/update de usuarios.
 
 app.listen(PORT, () => console.log(`Usuarios API corriendo en puerto ${PORT}`));
