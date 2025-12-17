@@ -1,4 +1,4 @@
-// index_usuarios.js (modificado: acepta "admin" y "administrador")
+// index_usuarios.js
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -165,7 +165,7 @@ app.get("/usuarios", verificarToken, authorizeRole("admin", "administrador"), as
 app.get("/usuarios/:id", verificarToken, async (req, res) => {
   try {
     const { id } = req.params;
-    // si no es admin (aceptamos admin/administrador) solo puede ver su propio ID
+    // si no es admin solo puede ver su propio ID
     const requesterRole = (req.usuario?.rol || req.usuario?.tipo_usuario || "").toString().toLowerCase();
     if (requesterRole !== "admin" && requesterRole !== "administrador" && Number(req.usuario.id) !== Number(id)) {
       return res.status(403).json({ message: "Acceso denegado" });
@@ -180,6 +180,85 @@ app.get("/usuarios/:id", verificarToken, async (req, res) => {
   }
 });
 
-// Aquí puedes añadir authorizeRole("admin","administrador") en rutas sensibles como delete/update de usuarios.
+/*
+  PUT /usuarios/:id
+  - Permite a admin actualizar cualquier usuario
+  - Permite al propio usuario actualizar su registro
+*/
+app.put("/usuarios/:id", verificarToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const requesterRole = (req.usuario?.rol || req.usuario?.tipo_usuario || "").toString().toLowerCase();
+    const requesterId = Number(req.usuario?.id);
+
+    if (requesterRole !== "admin" && requesterRole !== "administrador" && requesterId !== Number(id)) {
+      return res.status(403).json({ message: "Acceso denegado para actualizar este usuario" });
+    }
+
+    const body = req.body || {};
+
+    // Campos aceptados
+    const fields = {
+      run: normalizeEmptyToNull(body.run),
+      nombre: normalizeEmptyToNull(body.nombre),
+      apellidos: normalizeEmptyToNull(body.apellidos),
+      correo: normalizeEmptyToNull(body.correo),
+      password: normalizeEmptyToNull(body.password),
+      fecha_nacimiento: normalizeEmptyToNull(body.fechaNacimiento ?? body.fecha_nacimiento),
+      tipo_usuario: normalizeEmptyToNull(body.tipoUsuario ?? body.tipo_usuario),
+      direccion: normalizeEmptyToNull(body.direccion),
+      region: normalizeEmptyToNull(body.region),
+      comuna: normalizeEmptyToNull(body.comuna),
+      departamento: normalizeEmptyToNull(body.departamento),
+      indicacion: normalizeEmptyToNull(body.indicacion),
+    };
+
+    // Construir dinámicamente query SET
+    const setParts = [];
+    const values = [];
+    let idx = 1;
+    for (let key in fields) {
+      if (fields[key] !== null) {
+        setParts.push(`${key}=$${idx}`);
+        values.push(fields[key]);
+        idx++;
+      }
+    }
+
+    if (setParts.length === 0) {
+      return res.status(400).json({ message: "No hay campos para actualizar" });
+    }
+
+    const sql = `UPDATE usuario SET ${setParts.join(", ")} WHERE id=$${idx} RETURNING *`;
+    values.push(id);
+
+    const result = await pool.query(sql, values);
+    if (result.rows.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
+
+    const updated = normalizarUsuario(result.rows[0]);
+    res.json({ ok: true, user: updated });
+  } catch (err) {
+    console.error("Error PUT /usuarios/:id", err.stack || err);
+    res.status(500).json({ message: "Error al actualizar usuario", error: err.message });
+  }
+});
+
+/*
+  DELETE /usuarios/:id
+  - Solo admin/administrador puede eliminar usuarios
+*/
+app.delete("/usuarios/:id", verificarToken, authorizeRole("admin", "administrador"), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query("DELETE FROM usuario WHERE id=$1 RETURNING *", [id]);
+    if (result.rows.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
+    res.json({ ok: true, deleted: result.rows[0] });
+  } catch (err) {
+    console.error("Error DELETE /usuarios/:id", err.stack || err);
+    res.status(500).json({ message: "Error al eliminar usuario", error: err.message });
+  }
+});
+
+// Aquí puedes añadir authorizeRole("admin","administrador") en otras rutas sensibles como delete/update de usuarios.
 
 app.listen(PORT, () => console.log(`Usuarios API corriendo en puerto ${PORT}`));
